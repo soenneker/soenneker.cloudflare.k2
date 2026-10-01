@@ -5,7 +5,7 @@ using Soenneker.Cloudflare.K2.Models;
 namespace Soenneker.Cloudflare.K2.Serialization;
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
-[JsonSerializable(typeof(K2ProduceRequest))]
+[JsonSerializable(typeof(K2Record))]
 [JsonSerializable(typeof(K2ConsumeRequest))]
 [JsonSerializable(typeof(K2WorkerRequest))]
 [JsonSerializable(typeof(K2CreateSubscription))]

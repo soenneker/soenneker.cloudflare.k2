@@ -1,5 +1,6 @@
 using Soenneker.Extensions.Task;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
@@ -100,16 +101,14 @@ public sealed class CloudflareK2Client : ICloudflareK2Client
     public async ValueTask SendMessages(string streamId, IReadOnlyList<K2Record> records,
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        string endpoint = Endpoint(streamId);
         ArgumentNullException.ThrowIfNull(records);
         if (records.Count == 0)
             throw new ArgumentException("A batch must contain at least one record.", nameof(records));
-        foreach (K2Record record in records)
-            ValidateRecord(record);
-        byte[] body = Serialize(new K2ProduceRequest(records), Json.K2ProduceRequest);
-        if (body.Length > 5_000_000)
-            throw new ArgumentException("The encoded batch exceeds the 5 MB HTTP body limit.", nameof(records));
+        ReadOnlyMemory<byte> body = SerializeRecords(records, cancellationToken);
         using JsonDocument response =
-            await Send(HttpMethod.Post, Endpoint(streamId) + "/produce", body, true, cancellationToken).NoSync();
+            await Send(HttpMethod.Post, endpoint + "/produce", body, true, cancellationToken).NoSync();
     }
 
     public async ValueTask<K2Subscription> CreateSubscription(string streamId, string name, bool startAtLatest = false,
@@ -190,20 +189,26 @@ public sealed class CloudflareK2Client : ICloudflareK2Client
             Serialize(new K2WorkerRequest(worker), Json.K2WorkerRequest), false, ct);
     }
 
-    private async Task<JsonDocument> Send(HttpMethod method, string uri, byte[]? body, bool produce,
+    private async Task<JsonDocument> Send(HttpMethod method, string uri, ReadOnlyMemory<byte>? body, bool produce,
         CancellationToken ct)
     {
         using var request = new HttpRequestMessage(method, uri);
         if (body != null)
         {
-            request.Content = new ByteArrayContent(body);
+            request.Content = new ReadOnlyMemoryContent(body.Value);
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         }
 
         System.Net.Http.HttpClient http = string.IsNullOrWhiteSpace(_token)
             ? await _http.Get(ct).NoSync()
             : await _http.Get(_token, ct).NoSync();
-        using HttpResponseMessage response = await http.SendAsync(request, ct).NoSync();
+        // ResponseHeadersRead avoids a second full response buffer. Keep the client's
+        // timeout in force through body parsing as well as receipt of the headers.
+        using CancellationTokenSource? timeout = http.Timeout == Timeout.InfiniteTimeSpan
+            ? null : CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout?.CancelAfter(http.Timeout);
+        ct = timeout?.Token ?? ct;
+        using HttpResponseMessage response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).NoSync();
         // K2 limits consume responses to 10 MB; cancellation also applies to reading the body.
         Stream content = await response.Content.ReadAsStreamAsync(ct).NoSync();
         JsonDocument document;
@@ -253,6 +258,29 @@ public sealed class CloudflareK2Client : ICloudflareK2Client
     private static byte[] Serialize<T>(T value, JsonTypeInfo<T> info) =>
         JsonSerializer.SerializeToUtf8Bytes(value, info);
 
+    private static ReadOnlyMemory<byte> SerializeRecords(IReadOnlyList<K2Record> records, CancellationToken ct)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(buffer);
+        writer.WriteStartObject();
+        writer.WriteStartArray("records");
+        for (int i = 0; i < records.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            K2Record record = records[i];
+            ValidateRecord(record);
+            JsonSerializer.Serialize(writer, record, Json.K2Record);
+            // Reserve the closing array and object; stop before encoding the rest
+            // of an oversized input, and send the buffer without a final copy.
+            if (writer.BytesCommitted + writer.BytesPending + 2 > 5_000_000)
+                throw new ArgumentException("The encoded batch exceeds the 5 MB HTTP body limit.", nameof(records));
+        }
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+        writer.Flush();
+        return buffer.WrittenMemory;
+    }
+
     private static T Result<T>(JsonDocument document, JsonTypeInfo<T> info) =>
         document.RootElement.GetProperty("result").Deserialize(info) ??
         throw new JsonException("K2 returned a null result.");
@@ -296,7 +324,7 @@ public sealed class CloudflareK2Client : ICloudflareK2Client
             throw new ArgumentException("Worker IDs cannot exceed 256 characters.", nameof(worker));
     }
 
-    private static void ValidateName(string name, bool allowHyphen)
+    internal static void ValidateName(string name, bool allowHyphen)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         if (name.Length > 128)

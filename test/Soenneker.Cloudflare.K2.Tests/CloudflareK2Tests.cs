@@ -119,8 +119,8 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Receptor_completes_only_after_handler_success()
     {
-        var handled = Signal(); var release = Signal(); var ack = Signal();
-        using var handler = ReceptorHandler(ack: () => ack.TrySetResult());
+        TaskCompletionSource handled = Signal(); TaskCompletionSource release = Signal(); TaskCompletionSource ack = Signal();
+        using Handler handler = ReceptorHandler(ack: () => ack.TrySetResult());
         using var http = new System.Net.Http.HttpClient(handler);
         await using var receptor = new Receptor(Client(http), Settings(), async (_, _, ct) =>
         {
@@ -138,10 +138,10 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Receptor_failure_abandons_whole_batch()
     {
-        var nack = Signal(); int handled = 0;
-        using var handler = ReceptorHandler(nack: () => nack.TrySetResult(), recordCount: 2);
+        TaskCompletionSource nack = Signal(); int handled = 0;
+        using Handler handler = ReceptorHandler(nack: () => nack.TrySetResult(), recordCount: 2);
         using var http = new System.Net.Http.HttpClient(handler);
-        var settings = Settings(); settings.MaxRecords = 2;
+        CloudflareK2ReceptorOptions settings = Settings(); settings.MaxRecords = 2;
         await using var receptor = new Receptor(Client(http), settings, (_, _, _) =>
         {
             if (Interlocked.Increment(ref handled) == 2) throw new InvalidOperationException("handler failure");
@@ -156,10 +156,10 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Receptor_renews_slow_handlers()
     {
-        var renewed = Signal(); var ack = Signal();
-        using var handler = ReceptorHandler(ack: () => ack.TrySetResult(), extend: () => renewed.TrySetResult());
+        TaskCompletionSource renewed = Signal(); TaskCompletionSource ack = Signal();
+        using Handler handler = ReceptorHandler(ack: () => ack.TrySetResult(), extend: () => renewed.TrySetResult());
         using var http = new System.Net.Http.HttpClient(handler);
-        var settings = Settings(); settings.LeaseRenewalInterval = TimeSpan.FromMilliseconds(20);
+        CloudflareK2ReceptorOptions settings = Settings(); settings.LeaseRenewalInterval = TimeSpan.FromMilliseconds(20);
         await using var receptor = new Receptor(Client(http), settings, async (_, _, ct) => await renewed.Task.WaitAsync(ct));
         await receptor.Init();
         await ack.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -170,10 +170,10 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Lease_loss_cancels_handler_without_settling_stale_batch()
     {
-        var cancelled = Signal();
-        using var handler = ReceptorHandler(loseLease: true);
+        TaskCompletionSource cancelled = Signal();
+        using Handler handler = ReceptorHandler(loseLease: true);
         using var http = new System.Net.Http.HttpClient(handler);
-        var settings = Settings(); settings.LeaseRenewalInterval = TimeSpan.FromMilliseconds(20);
+        CloudflareK2ReceptorOptions settings = Settings(); settings.LeaseRenewalInterval = TimeSpan.FromMilliseconds(20);
         await using var receptor = new Receptor(Client(http), settings, async (_, _, ct) =>
         {
             try { await Task.Delay(Timeout.Infinite, ct); }
@@ -188,8 +188,8 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Shutdown_cancels_handler_and_releases_batch()
     {
-        var started = Signal();
-        using var handler = ReceptorHandler();
+        TaskCompletionSource started = Signal();
+        using Handler handler = ReceptorHandler();
         using var http = new System.Net.Http.HttpClient(handler);
         await using var receptor = new Receptor(Client(http), Settings(), async (_, _, ct) =>
         {
@@ -204,7 +204,7 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Repeated_init_does_not_duplicate_workers()
     {
-        using var handler = ReceptorHandler(empty: true);
+        using Handler handler = ReceptorHandler(empty: true);
         using var http = new System.Net.Http.HttpClient(handler);
         await using var receptor = new Receptor(Client(http), Settings(), (_, _, _) => ValueTask.CompletedTask);
         await Task.WhenAll(receptor.Init(), receptor.Init(), receptor.Init());
@@ -215,7 +215,7 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Concurrent_disposal_is_idempotent_and_prevents_restart()
     {
-        using var handler = ReceptorHandler(empty: true);
+        using Handler handler = ReceptorHandler(empty: true);
         using var http = new System.Net.Http.HttpClient(handler);
         var receptor = new Receptor(Client(http), Settings(), (_, _, _) => ValueTask.CompletedTask);
         await receptor.Init();
@@ -242,7 +242,7 @@ public sealed class CloudflareK2Tests
     {
         int reads = 0;
         string? worker = null;
-        var recovered = Signal();
+        TaskCompletionSource recovered = Signal();
         using var handler = new Handler(async request =>
         {
             if (request.RequestUri!.AbsolutePath == "/subscriptions")
@@ -285,7 +285,7 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Expired_batch_is_neither_processed_nor_settled()
     {
-        var consumed = Signal();
+        TaskCompletionSource consumed = Signal();
         using var handler = new Handler(request =>
         {
             if (request.RequestUri!.AbsolutePath == "/subscriptions")
@@ -305,10 +305,10 @@ public sealed class CloudflareK2Tests
     [Test]
     public async Task Processing_timeout_cancels_and_abandons()
     {
-        var released = Signal();
-        using var handler = ReceptorHandler(nack: () => released.TrySetResult());
+        TaskCompletionSource released = Signal();
+        using Handler handler = ReceptorHandler(nack: () => released.TrySetResult());
         using var http = new System.Net.Http.HttpClient(handler);
-        var settings = Settings(); settings.ProcessingTimeout = TimeSpan.FromMilliseconds(30);
+        CloudflareK2ReceptorOptions settings = Settings(); settings.ProcessingTimeout = TimeSpan.FromMilliseconds(30);
         await using var receptor = new Receptor(Client(http), settings, async (_, _, ct) => await Task.Delay(Timeout.Infinite, ct));
         await receptor.Init();
         await released.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -320,7 +320,7 @@ public sealed class CloudflareK2Tests
     public async Task Concurrent_consumers_use_distinct_worker_ids()
     {
         var workers = new ConcurrentDictionary<string, byte>();
-        var both = Signal();
+        TaskCompletionSource both = Signal();
         using var handler = new Handler(async request =>
         {
             if (request.RequestUri!.AbsolutePath == "/subscriptions")
@@ -331,7 +331,7 @@ public sealed class CloudflareK2Tests
             return Response(EmptyBatch);
         });
         using var http = new System.Net.Http.HttpClient(handler);
-        var settings = Settings(); settings.MaxConcurrentCalls = 2;
+        CloudflareK2ReceptorOptions settings = Settings(); settings.MaxConcurrentCalls = 2;
         await using var receptor = new Receptor(Client(http), settings, (_, _, _) => ValueTask.CompletedTask);
         await receptor.Init();
         await both.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -354,6 +354,66 @@ public sealed class CloudflareK2Tests
         K2StreamPage page = await client.ListStreams("orders test", 2, 10);
         Check(page.ResultInfo.TotalCount == 10 && page.ResultInfo.Page == 2);
         Check((await client.ListMonitoredSubscriptions(Stream)).Single().Lag!.Records == "12345678901234567890");
+    }
+
+    [Test]
+    public async Task Response_body_read_observes_http_timeout_and_disposes_stream()
+    {
+        var stream = new DelayedReadStream();
+        using var handler = new Handler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        }));
+        using var http = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(100) };
+        await Throws<OperationCanceledException>(() => Client(http).ReceiveMessages(Stream, Subscription, "worker").AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(5)));
+        Check(stream.Disposed);
+    }
+
+    [Test]
+    public async Task Oversized_batch_stops_before_encoding_remaining_records()
+    {
+        using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
+        using var http = new System.Net.Http.HttpClient(handler);
+        var record = new K2Record { Content = new byte[999_999] };
+        ArgumentException error = await Throws<ArgumentException>(() => Client(http)
+            .SendMessages(Stream, [record, record, record, record, null!]).AsTask());
+        Check(error is not ArgumentNullException && error.ParamName == "records" && handler.Calls == 0);
+    }
+
+    [Test]
+    public async Task Cancelled_batch_is_rejected_before_validation_or_encoding()
+    {
+        using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
+        using var http = new System.Net.Http.HttpClient(handler);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Throws<OperationCanceledException>(() => Client(http).SendMessages(Stream, [null!], cancellation.Token).AsTask());
+        await Throws<OperationCanceledException>(() => new CloudflareK2Transmitter(Client(http))
+            .SendMessages(Stream, Array.Empty<string>(), "test", TestJsonContext.Default.String, cancellation.Token).AsTask());
+        Check(handler.Calls == 0);
+    }
+
+    [Test]
+    public async Task Invalid_receptor_settings_fail_before_starting_workers()
+    {
+        using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
+        using var http = new System.Net.Http.HttpClient(handler);
+        CloudflareK2ReceptorOptions settings = Settings();
+        settings.ProcessingTimeout = TimeSpan.MaxValue;
+        await Throws<ArgumentOutOfRangeException>(() =>
+        {
+            _ = new Receptor(Client(http), settings, (_, _, _) => ValueTask.CompletedTask);
+            return Task.CompletedTask;
+        });
+        settings = Settings();
+        settings.SubscriptionName = "invalid/name";
+        await Throws<ArgumentException>(() =>
+        {
+            _ = new Receptor(Client(http), settings, (_, _, _) => ValueTask.CompletedTask);
+            return Task.CompletedTask;
+        });
+        Check(handler.Calls == 0);
     }
 
     private static CloudflareK2Client Client(System.Net.Http.HttpClient http) => new(new TestCloudflareHttpClient(http),
