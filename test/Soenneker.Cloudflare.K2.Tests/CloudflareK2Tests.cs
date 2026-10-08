@@ -25,13 +25,13 @@ public sealed class CloudflareK2Tests
     private const string Account = "44444444444444444444444444444444";
 
     [Test]
-    public async Task Transmitter_preserves_json_and_type_header()
+    public async Task Transmitter_preserves_json_and_type_header(CancellationToken cancellationToken)
     {
         using var handler = new Handler(async request =>
         {
             Check(request.RequestUri!.AbsoluteUri == $"https://{Stream}.k2.cloudflarestorage.com/produce");
             Check(request.Headers.Authorization?.ToString() == "Bearer test-token");
-            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken: cancellationToken));
             JsonElement record = body.RootElement.GetProperty("records")[0];
             Check(Encoding.UTF8.GetString(record.GetProperty("content").GetBytesFromBase64()) == "\"hello\"");
             Check(record.GetProperty("headers").GetProperty("type").GetString() == "greeting");
@@ -39,85 +39,85 @@ public sealed class CloudflareK2Tests
             return Response("{\"success\":true}");
         });
         using var http = new System.Net.Http.HttpClient(handler);
-        await new CloudflareK2Transmitter(Client(http)).SendMessage(Stream, "hello", "greeting", TestJsonContext.Default.String);
+        await new CloudflareK2Transmitter(Client(http)).SendMessage(Stream, "hello", "greeting", TestJsonContext.Default.String, cancellationToken: cancellationToken);
         Check(handler.Calls == 1);
     }
 
     [Test]
     [Arguments(10212, false)]
     [Arguments(10211, true)]
-    public async Task Produce_errors_are_exposed_without_hidden_resend(int code, bool retryable)
+    public async Task Produce_errors_are_exposed_without_hidden_resend(int code, bool retryable, CancellationToken cancellationToken)
     {
         using var handler = new Handler(_ => Task.FromResult(Response(
             $$"""{"success":false,"error":{"code":{{code}},"message":"failed","retryable":{{retryable.ToString().ToLowerInvariant()}} } }""", HttpStatusCode.ServiceUnavailable)));
         using var http = new System.Net.Http.HttpClient(handler);
-        CloudflareK2Exception error = await Throws<CloudflareK2Exception>(() => Client(http).SendMessages(Stream, [Record()]).AsTask());
+        CloudflareK2Exception error = await Throws<CloudflareK2Exception>(() => Client(http).SendMessages(Stream, [Record()], cancellationToken: cancellationToken).AsTask());
         Check(error.ErrorCode == code && error.Retryable == retryable && handler.Calls == 1);
     }
 
     [Test]
-    public async Task Receive_decodes_content_and_empty_batches()
+    public async Task Receive_decodes_content_and_empty_batches(CancellationToken cancellationToken)
     {
         int reads = 0;
         using var handler = new Handler(async request =>
         {
-            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken: cancellationToken));
             Check(body.RootElement.GetProperty("worker_id").GetString() == "worker");
             Check(body.RootElement.GetProperty("max_records").GetInt32() == 1);
             return Response(++reads == 1 ? BatchResponse() : EmptyBatch);
         });
         using var http = new System.Net.Http.HttpClient(handler);
-        K2Batch batch = await Client(http).ReceiveMessages(Stream, Subscription, "worker");
+        K2Batch batch = await Client(http).ReceiveMessages(Stream, Subscription, "worker", cancellationToken: cancellationToken);
         Check(batch.BatchId == Batch && batch.Records.Single().GetContentAsString() == "hello");
-        K2Batch empty = await Client(http).ReceiveMessages(Stream, Subscription, "worker");
+        K2Batch empty = await Client(http).ReceiveMessages(Stream, Subscription, "worker", cancellationToken: cancellationToken);
         Check(empty.BatchId == null && empty.LeasedUntilMs == null && empty.Records.Count == 0);
     }
 
     [Test]
-    public async Task Invalid_and_oversized_batches_do_not_send()
+    public async Task Invalid_and_oversized_batches_do_not_send(CancellationToken cancellationToken)
     {
         using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
         using var http = new System.Net.Http.HttpClient(handler);
         CloudflareK2Client client = Client(http);
-        await Throws<ArgumentException>(() => client.SendMessages(Stream, []).AsTask());
-        await Throws<ArgumentException>(() => client.SendMessages(Stream, [new K2Record { Content = new byte[1_000_001] }]).AsTask());
-        await Throws<ArgumentException>(() => client.SendMessages(Stream, Enumerable.Range(0, 4).Select(_ => new K2Record { Content = new byte[999_999] }).ToArray()).AsTask());
-        await Throws<ArgumentException>(() => client.SendMessages("../another-host", [Record()]).AsTask());
-        await Throws<ArgumentOutOfRangeException>(() => client.ReceiveMessages(Stream, Subscription, "worker", 10_001).AsTask());
+        await Throws<ArgumentException>(() => client.SendMessages(Stream, [], cancellationToken: cancellationToken).AsTask());
+        await Throws<ArgumentException>(() => client.SendMessages(Stream, [new K2Record { Content = new byte[1_000_001] }], cancellationToken: cancellationToken).AsTask());
+        await Throws<ArgumentException>(() => client.SendMessages(Stream, Enumerable.Range(0, 4).Select(_ => new K2Record { Content = new byte[999_999] }).ToArray(), cancellationToken: cancellationToken).AsTask());
+        await Throws<ArgumentException>(() => client.SendMessages("../another-host", [Record()], cancellationToken: cancellationToken).AsTask());
+        await Throws<ArgumentOutOfRangeException>(() => client.ReceiveMessages(Stream, Subscription, "worker", 10_001, cancellationToken: cancellationToken).AsTask());
         Check(handler.Calls == 0);
     }
 
     [Test]
-    public async Task Management_uses_account_endpoint_and_authenticated_http_default()
+    public async Task Management_uses_account_endpoint_and_authenticated_http_default(CancellationToken cancellationToken)
     {
         using var handler = new Handler(async request =>
         {
             Check(request.RequestUri!.AbsoluteUri == $"https://api.cloudflare.com/client/v4/accounts/{Account}/k2/streams");
-            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken: cancellationToken));
             Check(body.RootElement.GetProperty("http").GetProperty("authentication").GetBoolean());
             Check(!body.RootElement.TryGetProperty("retention_seconds", out _));
             return Response($$"""{"success":true,"result":{"id":"{{Stream}}","name":"orders","retention_seconds":604800} }""");
         });
         using var http = new System.Net.Http.HttpClient(handler);
-        Check((await Client(http).CreateStream(new K2CreateStream { Name = "orders" })).Id == Stream);
+        Check((await Client(http).CreateStream(new K2CreateStream { Name = "orders" }, cancellationToken: cancellationToken)).Id == Stream);
     }
 
     [Test]
-    public async Task Subscription_creation_preserves_start_position()
+    public async Task Subscription_creation_preserves_start_position(CancellationToken cancellationToken)
     {
         using var handler = new Handler(async request =>
         {
             Check(request.RequestUri!.AbsolutePath == "/subscriptions");
-            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken: cancellationToken));
             Check(body.RootElement.GetProperty("start_at").GetProperty("type").GetString() == "latest");
             return Response($$"""{"success":true,"result":{"id":"{{Subscription}}"} }""");
         });
         using var http = new System.Net.Http.HttpClient(handler);
-        Check((await Client(http).CreateSubscription(Stream, "orders-handler", true)).Id == Subscription);
+        Check((await Client(http).CreateSubscription(Stream, "orders-handler", true, cancellationToken: cancellationToken)).Id == Subscription);
     }
 
     [Test]
-    public async Task Receptor_completes_only_after_handler_success()
+    public async Task Receptor_completes_only_after_handler_success(CancellationToken cancellationToken)
     {
         TaskCompletionSource handled = Signal(); TaskCompletionSource release = Signal(); TaskCompletionSource ack = Signal();
         using Handler handler = ReceptorHandler(ack: () => ack.TrySetResult());
@@ -126,17 +126,17 @@ public sealed class CloudflareK2Tests
         {
             handled.TrySetResult(); await release.Task.WaitAsync(ct);
         });
-        await receptor.Init();
-        await handled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await receptor.Init(cancellationToken: cancellationToken);
+        await handled.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
         Check(!ack.Task.IsCompleted);
         release.TrySetResult();
-        await ack.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await ack.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(handler.Paths.Count(p => p.EndsWith("/ack")) == 1 && !handler.Paths.Any(p => p.EndsWith("/nack")));
     }
 
     [Test]
-    public async Task Receptor_failure_abandons_whole_batch()
+    public async Task Receptor_failure_abandons_whole_batch(CancellationToken cancellationToken)
     {
         TaskCompletionSource nack = Signal(); int handled = 0;
         using Handler handler = ReceptorHandler(nack: () => nack.TrySetResult(), recordCount: 2);
@@ -147,28 +147,28 @@ public sealed class CloudflareK2Tests
             if (Interlocked.Increment(ref handled) == 2) throw new InvalidOperationException("handler failure");
             return ValueTask.CompletedTask;
         });
-        await receptor.Init();
-        await nack.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await nack.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(handled == 2 && !handler.Paths.Any(p => p.EndsWith("/ack")));
     }
 
     [Test]
-    public async Task Receptor_renews_slow_handlers()
+    public async Task Receptor_renews_slow_handlers(CancellationToken cancellationToken)
     {
         TaskCompletionSource renewed = Signal(); TaskCompletionSource ack = Signal();
         using Handler handler = ReceptorHandler(ack: () => ack.TrySetResult(), extend: () => renewed.TrySetResult());
         using var http = new System.Net.Http.HttpClient(handler);
         CloudflareK2ReceptorOptions settings = Settings(); settings.LeaseRenewalInterval = TimeSpan.FromMilliseconds(20);
         await using var receptor = new Receptor(Client(http), settings, async (_, _, ct) => await renewed.Task.WaitAsync(ct));
-        await receptor.Init();
-        await ack.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await ack.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(handler.Paths.Any(p => p.EndsWith("/extend")));
     }
 
     [Test]
-    public async Task Lease_loss_cancels_handler_without_settling_stale_batch()
+    public async Task Lease_loss_cancels_handler_without_settling_stale_batch(CancellationToken cancellationToken)
     {
         TaskCompletionSource cancelled = Signal();
         using Handler handler = ReceptorHandler(loseLease: true);
@@ -179,14 +179,14 @@ public sealed class CloudflareK2Tests
             try { await Task.Delay(Timeout.Infinite, ct); }
             finally { cancelled.TrySetResult(); }
         });
-        await receptor.Init();
-        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(!handler.Paths.Any(p => p.EndsWith("/ack") || p.EndsWith("/nack")));
     }
 
     [Test]
-    public async Task Shutdown_cancels_handler_and_releases_batch()
+    public async Task Shutdown_cancels_handler_and_releases_batch(CancellationToken cancellationToken)
     {
         TaskCompletionSource started = Signal();
         using Handler handler = ReceptorHandler();
@@ -195,33 +195,33 @@ public sealed class CloudflareK2Tests
         {
             started.TrySetResult(); await Task.Delay(Timeout.Infinite, ct);
         });
-        await receptor.Init();
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop().WaitAsync(TimeSpan.FromSeconds(5));
+        await receptor.Init(cancellationToken: cancellationToken);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken).WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
         Check(handler.Paths.Any(p => p.EndsWith("/nack")) && !handler.Paths.Any(p => p.EndsWith("/ack")));
     }
 
     [Test]
-    public async Task Repeated_init_does_not_duplicate_workers()
+    public async Task Repeated_init_does_not_duplicate_workers(CancellationToken cancellationToken)
     {
         using Handler handler = ReceptorHandler(empty: true);
         using var http = new System.Net.Http.HttpClient(handler);
         await using var receptor = new Receptor(Client(http), Settings(), (_, _, _) => ValueTask.CompletedTask);
-        await Task.WhenAll(receptor.Init(), receptor.Init(), receptor.Init());
-        await receptor.Stop();
+        await Task.WhenAll(receptor.Init(cancellationToken: cancellationToken), receptor.Init(cancellationToken: cancellationToken), receptor.Init(cancellationToken: cancellationToken));
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(handler.Paths.Count(p => p == "/subscriptions") == 1);
     }
 
     [Test]
-    public async Task Concurrent_disposal_is_idempotent_and_prevents_restart()
+    public async Task Concurrent_disposal_is_idempotent_and_prevents_restart(CancellationToken cancellationToken)
     {
         using Handler handler = ReceptorHandler(empty: true);
         using var http = new System.Net.Http.HttpClient(handler);
         var receptor = new Receptor(Client(http), Settings(), (_, _, _) => ValueTask.CompletedTask);
-        await receptor.Init();
+        await receptor.Init(cancellationToken: cancellationToken);
         await Task.WhenAll(receptor.DisposeAsync().AsTask(), receptor.DisposeAsync().AsTask());
-        await receptor.Stop();
-        await Throws<ObjectDisposedException>(() => receptor.Init());
+        await receptor.Stop(cancellationToken: cancellationToken);
+        await Throws<ObjectDisposedException>(() => receptor.Init(cancellationToken: cancellationToken));
         Check(receptor.Completion.IsCompleted);
     }
 
@@ -238,7 +238,7 @@ public sealed class CloudflareK2Tests
     }
 
     [Test]
-    public async Task Transient_receive_recovers_with_the_same_worker_id()
+    public async Task Transient_receive_recovers_with_the_same_worker_id(CancellationToken cancellationToken)
     {
         int reads = 0;
         string? worker = null;
@@ -247,7 +247,7 @@ public sealed class CloudflareK2Tests
         {
             if (request.RequestUri!.AbsolutePath == "/subscriptions")
                 return Response($$"""{"success":true,"result":{"id":"{{Subscription}}"} }""");
-            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken: cancellationToken));
             string current = body.RootElement.GetProperty("worker_id").GetString()!;
             if (Interlocked.Increment(ref reads) == 1)
             {
@@ -260,30 +260,30 @@ public sealed class CloudflareK2Tests
         });
         using var http = new System.Net.Http.HttpClient(handler);
         await using var receptor = new Receptor(Client(http), Settings(), (_, _, _) => ValueTask.CompletedTask);
-        await receptor.Init();
-        await recovered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await recovered.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(reads >= 2);
     }
 
     [Test]
-    public async Task Nonretryable_receive_fault_is_observable()
+    public async Task Nonretryable_receive_fault_is_observable(CancellationToken cancellationToken)
     {
         using var handler = new Handler(request => Task.FromResult(request.RequestUri!.AbsolutePath == "/subscriptions"
             ? Response($$"""{"success":true,"result":{"id":"{{Subscription}}"} }""")
             : Response("{\"success\":false,\"errors\":[{\"code\":10210,\"message\":\"permission denied\"}]}", HttpStatusCode.Forbidden)));
         using var http = new System.Net.Http.HttpClient(handler);
         var receptor = new Receptor(Client(http), Settings(), (_, _, _) => ValueTask.CompletedTask);
-        await receptor.Init();
-        CloudflareK2Exception error = await Throws<CloudflareK2Exception>(() => receptor.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        await receptor.Init(cancellationToken: cancellationToken);
+        CloudflareK2Exception error = await Throws<CloudflareK2Exception>(() => receptor.Completion.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken));
         Check(error.ErrorCode == 10210 && !error.Retryable);
-        await Throws<CloudflareK2Exception>(() => receptor.Stop());
+        await Throws<CloudflareK2Exception>(() => receptor.Stop(cancellationToken: cancellationToken));
         await receptor.DisposeAsync();
         Check(handler.Paths.Count(p => p.EndsWith("/consume")) == 1);
     }
 
     [Test]
-    public async Task Expired_batch_is_neither_processed_nor_settled()
+    public async Task Expired_batch_is_neither_processed_nor_settled(CancellationToken cancellationToken)
     {
         TaskCompletionSource consumed = Signal();
         using var handler = new Handler(request =>
@@ -296,28 +296,28 @@ public sealed class CloudflareK2Tests
         using var http = new System.Net.Http.HttpClient(handler);
         int calls = 0;
         await using var receptor = new Receptor(Client(http), Settings(), (_, _, _) => { Interlocked.Increment(ref calls); return ValueTask.CompletedTask; });
-        await receptor.Init();
-        await consumed.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await consumed.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(calls == 0 && !handler.Paths.Any(p => p.EndsWith("/ack") || p.EndsWith("/nack")));
     }
 
     [Test]
-    public async Task Processing_timeout_cancels_and_abandons()
+    public async Task Processing_timeout_cancels_and_abandons(CancellationToken cancellationToken)
     {
         TaskCompletionSource released = Signal();
         using Handler handler = ReceptorHandler(nack: () => released.TrySetResult());
         using var http = new System.Net.Http.HttpClient(handler);
         CloudflareK2ReceptorOptions settings = Settings(); settings.ProcessingTimeout = TimeSpan.FromMilliseconds(30);
         await using var receptor = new Receptor(Client(http), settings, async (_, _, ct) => await Task.Delay(Timeout.Infinite, ct));
-        await receptor.Init();
-        await released.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await released.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(!handler.Paths.Any(p => p.EndsWith("/ack")));
     }
 
     [Test]
-    public async Task Concurrent_consumers_use_distinct_worker_ids()
+    public async Task Concurrent_consumers_use_distinct_worker_ids(CancellationToken cancellationToken)
     {
         var workers = new ConcurrentDictionary<string, byte>();
         TaskCompletionSource both = Signal();
@@ -325,7 +325,7 @@ public sealed class CloudflareK2Tests
         {
             if (request.RequestUri!.AbsolutePath == "/subscriptions")
                 return Response($$"""{"success":true,"result":{"id":"{{Subscription}}"} }""");
-            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            using JsonDocument body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken: cancellationToken));
             workers.TryAdd(body.RootElement.GetProperty("worker_id").GetString()!, 0);
             if (workers.Count == 2) both.TrySetResult();
             return Response(EmptyBatch);
@@ -333,14 +333,14 @@ public sealed class CloudflareK2Tests
         using var http = new System.Net.Http.HttpClient(handler);
         CloudflareK2ReceptorOptions settings = Settings(); settings.MaxConcurrentCalls = 2;
         await using var receptor = new Receptor(Client(http), settings, (_, _, _) => ValueTask.CompletedTask);
-        await receptor.Init();
-        await both.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await receptor.Stop();
+        await receptor.Init(cancellationToken: cancellationToken);
+        await both.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+        await receptor.Stop(cancellationToken: cancellationToken);
         Check(workers.Count == 2);
     }
 
     [Test]
-    public async Task Stream_pagination_and_monitoring_preserve_metadata()
+    public async Task Stream_pagination_and_monitoring_preserve_metadata(CancellationToken cancellationToken)
     {
         using var handler = new Handler(request =>
         {
@@ -351,13 +351,13 @@ public sealed class CloudflareK2Tests
         });
         using var http = new System.Net.Http.HttpClient(handler);
         CloudflareK2Client client = Client(http);
-        K2StreamPage page = await client.ListStreams("orders test", 2, 10);
+        K2StreamPage page = await client.ListStreams("orders test", 2, 10, cancellationToken: cancellationToken);
         Check(page.ResultInfo.TotalCount == 10 && page.ResultInfo.Page == 2);
-        Check((await client.ListMonitoredSubscriptions(Stream)).Single().Lag!.Records == "12345678901234567890");
+        Check((await client.ListMonitoredSubscriptions(Stream, cancellationToken: cancellationToken)).Single().Lag!.Records == "12345678901234567890");
     }
 
     [Test]
-    public async Task Response_body_read_observes_http_timeout_and_disposes_stream()
+    public async Task Response_body_read_observes_http_timeout_and_disposes_stream(CancellationToken cancellationToken)
     {
         var stream = new DelayedReadStream();
         using var handler = new Handler(_ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
@@ -365,24 +365,24 @@ public sealed class CloudflareK2Tests
             Content = new StreamContent(stream)
         }));
         using var http = new System.Net.Http.HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(100) };
-        await Throws<OperationCanceledException>(() => Client(http).ReceiveMessages(Stream, Subscription, "worker").AsTask()
-            .WaitAsync(TimeSpan.FromSeconds(5)));
+        await Throws<OperationCanceledException>(() => Client(http).ReceiveMessages(Stream, Subscription, "worker", cancellationToken: cancellationToken).AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(5), cancellationToken: cancellationToken));
         Check(stream.Disposed);
     }
 
     [Test]
-    public async Task Oversized_batch_stops_before_encoding_remaining_records()
+    public async Task Oversized_batch_stops_before_encoding_remaining_records(CancellationToken cancellationToken)
     {
         using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
         using var http = new System.Net.Http.HttpClient(handler);
         var record = new K2Record { Content = new byte[999_999] };
         ArgumentException error = await Throws<ArgumentException>(() => Client(http)
-            .SendMessages(Stream, [record, record, record, record, null!]).AsTask());
+            .SendMessages(Stream, [record, record, record, record, null!], cancellationToken: cancellationToken).AsTask());
         Check(error is not ArgumentNullException && error.ParamName == "records" && handler.Calls == 0);
     }
 
     [Test]
-    public async Task Cancelled_batch_is_rejected_before_validation_or_encoding()
+    public async Task Cancelled_batch_is_rejected_before_validation_or_encoding(CancellationToken cancellationToken)
     {
         using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
         using var http = new System.Net.Http.HttpClient(handler);
@@ -395,7 +395,7 @@ public sealed class CloudflareK2Tests
     }
 
     [Test]
-    public async Task Invalid_receptor_settings_fail_before_starting_workers()
+    public async Task Invalid_receptor_settings_fail_before_starting_workers(CancellationToken cancellationToken)
     {
         using var handler = new Handler(_ => throw new Exception("Unexpected network call"));
         using var http = new System.Net.Http.HttpClient(handler);
