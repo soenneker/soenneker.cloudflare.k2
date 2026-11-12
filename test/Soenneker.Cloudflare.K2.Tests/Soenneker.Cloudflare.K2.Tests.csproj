@@ -10,7 +10,7 @@
 
     <ItemGroup>
         <PackageReference Include="Microsoft.Extensions.Logging" Version="11.0.0" />
-        <PackageReference Include="TUnit" Version="1.83.8" />
+        <PackageReference Include="TUnit" Version="1.84.0" />
     </ItemGroup>
 
     <ItemGroup>
